@@ -1,0 +1,67 @@
+# Dependencies
+/node_modules
+
+# Build output
+/dist
+/build
+dist-ssr/
+
+# Environment variables
+.env
+.env*.local
+.env.*.local
+
+# IDE and OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Log files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Test coverage
+/coverage # Changed to /coverage to ensure it only matches a root folder
+
+# Tool Outputs / Generated Files
+repomix-output.xml
+*.Pak  
+*.hyb
+
+# TypeScript specific
+*.tsbuildinfo
+
+# Firebase specific
+.firebase/
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*
+
+# Testing
+__snapshots__/
+*.snap
+
+# Package managers
+.pnpm-store/
+.npm
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# Optional - Cache directories
+.cache/
+.temp/
+
+# Misc
+*.bak
+*.tmp
+

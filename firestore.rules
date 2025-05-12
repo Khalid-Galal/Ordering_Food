@@ -1,0 +1,147 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- Helper Functions ---
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isSessionAdmin(sessionId) {
+      // Check if the requester is authenticated and their UID matches the session's adminId
+      return isAuthenticated() && request.auth.uid == get(/databases/$(database)/documents/sessions/$(sessionId)).data.adminId;
+    }
+
+    function isSessionOpen(sessionId) {
+      return get(/databases/$(database)/documents/sessions/$(sessionId)).data.status == 'open';
+    }
+
+    // Assuming member document ID in the 'members' subcollection is the user's UID
+    function isSessionMemberByUID(sessionId, userId) {
+      return exists(/databases/$(database)/documents/sessions/$(sessionId)/members/$(userId));
+    }
+
+    // --- Sessions Collection (/sessions/{sessionId}) ---
+    match /sessions/{sessionId} {
+      // ANY authenticated user can read session details.
+      allow read: if isAuthenticated();
+
+      // ONLY an authenticated user can create a session.
+      // The created session's 'adminId' MUST be the UID of the creator.
+      // The status must be 'open' on creation.
+      // Creator must provide a title and their phone number.
+      allow create: if isAuthenticated() &&
+                       request.resource.data.adminId == request.auth.uid &&
+                       request.resource.data.status == 'open' &&
+                       request.resource.data.title is string && request.resource.data.title.size() > 0 &&
+                       request.resource.data.adminPhone is string && request.resource.data.adminPhone.size() > 0 &&
+                       request.resource.data.createdAt == request.time; // Ensure createdAt is server timestamp
+
+      // ONLY the session admin can update the session.
+      // Define which fields they are allowed to update.
+      allow update: if isSessionAdmin(sessionId) &&
+                       // Admin can update title, adminPhone, status, and invoiceImageUrl.
+                       // They cannot change adminId or createdAt.
+                       request.resource.data.adminId == resource.data.adminId &&
+                       request.resource.data.createdAt == resource.data.createdAt;
+                       // Example of more specific field control:
+                       // request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'adminPhone', 'status', 'invoiceImageUrl','vatPercentage','deliveryFee']);
+
+
+      // ONLY the session admin can delete the session.
+      allow delete: if isSessionAdmin(sessionId);
+
+      // --- Members Subcollection (/sessions/{sessionId}/members/{memberDocId}) ---
+      // Assuming memberDocId is the user's UID for simplicity and easier rule checking.
+      match /members/{memberUid} {
+        // ANY authenticated user can read the list of members and their status.
+        allow read: if isAuthenticated();
+
+        // An authenticated user can add THEMSELVES as a member IF:
+        // 1. The member document ID being created matches their UID.
+        // 2. The session is 'open'.
+        // 3. The data being written includes their UID, name, and isPaid is initially false.
+        allow create: if isAuthenticated() &&
+                         request.auth.uid == memberUid && // User is creating their own member entry
+                         isSessionOpen(sessionId) &&
+                         request.resource.data.uid == request.auth.uid &&
+                         request.resource.data.name is string && request.resource.data.name.size() > 0 &&
+                         request.resource.data.isPaid == false &&
+                         request.resource.data.joinedAt == request.time;
+
+        // A member can update their OWN 'isPaid' status (to true).
+        // The session admin can update ANY member's 'isPaid' status (to true or false).
+        // No other fields (like name or uid) can be changed after creation via update.
+        allow update: if isAuthenticated() &&
+                         request.resource.data.uid == resource.data.uid && // uid cannot change
+                         request.resource.data.name == resource.data.name && // name cannot change
+                         request.resource.data.joinedAt == resource.data.joinedAt && // joinedAt cannot change
+                         (
+                           (request.auth.uid == resource.data.uid && request.resource.data.isPaid == true && resource.data.isPaid == false) || // Member marks self as paid
+                           (isSessionAdmin(sessionId)) // Admin can change isPaid to true or false
+                         );
+
+        // Generally, members should not be deleted to maintain order history integrity.
+        // If deletion is needed, only allow admin.
+        allow delete: if isSessionAdmin(sessionId);
+      }
+
+      // --- Orders Subcollection (/sessions/{sessionId}/orders/{orderId}) ---
+      match /orders/{orderId} {
+        // ANY authenticated user who is a member of this session can read orders.
+        allow read: if isAuthenticated() && isSessionMemberByUID(sessionId, request.auth.uid);
+
+        // An authenticated user can create an order IF:
+        // 1. They are a member of the session.
+        // 2. The session is 'open'.
+        // 3. The 'memberId' in the order data is their own UID.
+        // 4. 'price' is initially null.
+        allow create: if isAuthenticated() &&
+                         isSessionMemberByUID(sessionId, request.auth.uid) &&
+                         isSessionOpen(sessionId) &&
+                         request.resource.data.memberId == request.auth.uid &&
+                         request.resource.data.memberName is string && request.resource.data.memberName.size() > 0 &&
+                         request.resource.data.itemDescription is string && request.resource.data.itemDescription.size() > 0 &&
+                         request.resource.data.price == null &&
+                         request.resource.data.createdAt == request.time;
+
+        // Updating orders:
+        // - Session Admin can update the 'price' of any order IF the session is 'locked' or 'open' (but not 'finalized').
+        // - The order creator (member) can update their 'itemDescription' IF the session is 'open' AND the price is still 'null'.
+        // - No other fields can be changed.
+        allow update: if isAuthenticated() &&
+                         isSessionMemberByUID(sessionId, request.auth.uid) && // Requester must be a member
+                         request.resource.data.memberId == resource.data.memberId && // memberId cannot change
+                         request.resource.data.memberName == resource.data.memberName && // memberName cannot change
+                         request.resource.data.createdAt == resource.data.createdAt && // createdAt cannot change
+                         get(/databases/$(database)/documents/sessions/$(sessionId)).data.status != 'finalized' && // No updates if finalized
+                         (
+                           ( // Admin updates price
+                             isSessionAdmin(sessionId) &&
+                             request.resource.data.itemDescription == resource.data.itemDescription && // Description not changed by admin here
+                             request.resource.data.price is number || request.resource.data.price == null // Price can be set or cleared by admin
+                           ) ||
+                           ( // Member updates own itemDescription
+                             request.auth.uid == resource.data.memberId &&
+                             isSessionOpen(sessionId) &&
+                             resource.data.price == null && // Only if price not yet set
+                             request.resource.data.price == resource.data.price && // Price not changed by member
+                             request.resource.data.itemDescription is string && request.resource.data.itemDescription.size() > 0
+                           )
+                         );
+
+        // Deleting orders:
+        // - Session Admin can delete any order IF the session is NOT 'finalized'.
+        // - The order creator (member) can delete their OWN order IF the session is 'open' AND price is 'null'.
+        allow delete: if isAuthenticated() &&
+                         isSessionMemberByUID(sessionId, request.auth.uid) && // Requester must be a member
+                         get(/databases/$(database)/documents/sessions/$(sessionId)).data.status != 'finalized' && // No deletes if finalized
+                         (
+                           isSessionAdmin(sessionId) ||
+                           (request.auth.uid == resource.data.memberId && isSessionOpen(sessionId) && resource.data.price == null)
+                         );
+      }
+    }
+  }
+}
